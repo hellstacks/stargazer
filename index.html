@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AR Stargazer (Advanced)</title>
+    <!-- 1. Three.js for 3D rendering -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- Three.js AR Button helper -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/webxr/ARButton.js"></script>
+    <!-- 2. SunCalc for accurate Sun/Moon positions (in horizontal coordinates) -->
+    <script src="https://cdn.jsdelivr.net/npm/suncalc@1.9.0/suncalc.min.js"></script>
+    
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; }
+        canvas { display: block; }
+        .celestial-label {
+            color: white;
+            font-size: 16px;
+            font-family: 'Inter', sans-serif;
+            padding: 5px;
+            background: rgba(0, 0, 0, 0.7);
+            border-radius: 5px;
+            box-shadow: 0 0 5px rgba(255, 255, 255, 0.5);
+            pointer-events: none; /* Allows click to pass through to the AR Button */
+        }
+        #ar-button {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 12px 25px;
+            font-size: 1.2em;
+            background: linear-gradient(135deg, #007BFF, #0056b3);
+            color: white;
+            border: 2px solid #5C95FF;
+            border-radius: 8px;
+            cursor: pointer;
+            z-index: 1000;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(0, 123, 255, 0.4);
+        }
+        #ar-button:hover {
+            background: linear-gradient(135deg, #0056b3, #003c7a);
+        }
+        #info {
+            position: absolute;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: #FFD700;
+            z-index: 1000;
+            background: rgba(0, 0, 0, 0.6);
+            padding: 5px 10px;
+            border-radius: 5px;
+            font-family: 'Inter', sans-serif;
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+<body>
+    <div id="ar-button">Start AR Stargazing</div>
+    <div id="info">Waiting for Geolocation...</div>
+
+    <script>
+        // Global variables
+        let scene, camera, renderer, referenceSpace;
+        let latitude = 0, longitude = 0;
+        const celestialObjects = new THREE.Group();
+        
+        // Constants for conversion
+        const TO_RADIANS = Math.PI / 180;
+        const TO_DEGREES = 180 / Math.PI;
+
+        // --- STAR & PLANET DATA (J2000 Right Ascension and Declination) ---
+        // Planets use fixed coordinates here. A real app would need a full ephemeris library
+        // to calculate their movement, as their RA/Dec changes daily/hourly.
+        // RA is in hours (H), Dec is in degrees (D)
+        const STAR_DATA = {
+            'Sirius': { raH: 6.7525, decD: -16.7161, color: 0x00ffff, size: 0.05 }, // The Dog Star (brightest star)
+            'Vega': { raH: 18.6167, decD: +38.7837, color: 0x99ff99, size: 0.04 },  // Alpha Lyrae
+            // Added Planets (using fixed J2000 coordinates for demonstration)
+            'Mars (Fixed)': { raH: 0.573, decD: 2.22, color: 0xFF4500, size: 0.06 }, // Red-Orange color
+            'Jupiter (Fixed)': { raH: 18.064, decD: -22.75, color: 0xFFA500, size: 0.07 }, // Orange/Yellow color
+        };
+
+        // --- INITIALIZATION ---
+        init();
+
+        function init() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 100);
+            
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.xr.enabled = true;
+            document.body.appendChild(renderer.domElement);
+
+            scene.add(celestialObjects);
+
+            const arButton = document.getElementById('ar-button');
+            arButton.addEventListener('click', onARStart);
+
+            window.addEventListener('resize', onWindowResize);
+            
+            getGeolocation();
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        async function onARStart() {
+            try {
+                // Request the 'immersive-ar' session (WebXR requirement)
+                const session = await navigator.xr.requestSession('immersive-ar', {
+                    requiredFeatures: ['viewer', 'local'],
+                });
+                
+                renderer.setSession(session);
+                referenceSpace = await session.requestReferenceSpace('local');
+                
+                session.addEventListener('end', () => { 
+                    document.getElementById('ar-button').textContent = 'Start AR Stargazing'; 
+                });
+                
+                session.requestAnimationFrame(onXRFrame);
+                document.getElementById('ar-button').textContent = 'Stop AR';
+
+            } catch (error) {
+                console.error("AR session failed:", error);
+                alert("AR session failed to start. Ensure your Android device supports ARCore and you are using a compatible browser (e.g., Chrome).");
+            }
+        }
+        
+        function onXRFrame(time, frame) {
+            const session = frame.session;
+            session.requestAnimationFrame(onXRFrame);
+            
+            renderer.render(scene, camera);
+            
+            // Recalculate positions every frame (or less frequently for performance)
+            updateCelestialPositions();
+        }
+        
+        // --- GEOLOCATION & OBJECT CREATION ---
+        function getGeolocation() {
+            const infoElement = document.getElementById('info');
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition(
+                    (position) => {
+                        latitude = position.coords.latitude;
+                        longitude = position.coords.longitude;
+                        infoElement.textContent = `Location set: Lat ${latitude.toFixed(2)}°, Lon ${longitude.toFixed(2)}°`;
+                        
+                        // Create Sun and Moon
+                        createCelestialObject('Moon', 0xcccccc, 0.08); 
+                        createCelestialObject('Sun', 0xffaa00, 0.1); 
+                        
+                        // Create objects from STAR_DATA
+                        for (const name in STAR_DATA) {
+                            const data = STAR_DATA[name];
+                            createCelestialObject(name, data.color, data.size);
+                        }
+
+                        updateCelestialPositions(); 
+                    },
+                    (error) => {
+                        infoElement.textContent = "Geolocation failed. Using Lat 34°, Lon -100° (Central US Fallback).";
+                        latitude = 34; longitude = -100;
+                        console.error("Geolocation failed:", error);
+                        
+                        // Create objects even on fallback
+                        createCelestialObject('Moon', 0xcccccc, 0.08); 
+                        for (const name in STAR_DATA) {
+                            const data = STAR_DATA[name];
+                            createCelestialObject(name, data.color, data.size);
+                        }
+
+                        updateCelestialPositions();
+                    }
+                );
+            } else {
+                infoElement.textContent = "Geolocation unsupported. Using Lat 34°, Lon -100° (Fallback).";
+                latitude = 34; longitude = -100;
+                
+                createCelestialObject('Moon', 0xcccccc, 0.08); 
+                for (const name in STAR_DATA) {
+                    const data = STAR_DATA[name];
+                    createCelestialObject(name, data.color, data.size);
+                }
+            }
+        }
+
+        function createCelestialObject(name, color, size) {
+            const geometry = new THREE.SphereGeometry(size, 16, 16);
+            const material = new THREE.MeshBasicMaterial({ color: color, fog: false });
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.name = name;
+            celestialObjects.add(mesh);
+            
+            // Create a 3D Text Label using a Sprite
+            const canvas = document.createElement('canvas');
+            const context = canvas.getContext('2d');
+            const labelText = name.toUpperCase();
+            
+            // Setup canvas for text rendering
+            canvas.width = 256;
+            canvas.height = 64;
+            context.fillStyle = 'rgba(0, 0, 0, 0.5)';
+            context.fillRect(0, 0, canvas.width, canvas.height);
+            context.font = 'Bold 36px Inter, sans-serif';
+            context.fillStyle = 'white';
+            context.textAlign = 'center';
+            context.fillText(labelText, canvas.width / 2, canvas.height / 2 + 10);
+            
+            const texture = new THREE.CanvasTexture(canvas);
+            const spriteMaterial = new THREE.SpriteMaterial({ map: texture, transparent: true });
+            const sprite = new THREE.Sprite(spriteMaterial);
+            sprite.scale.set(1.5, 0.375, 1); 
+            sprite.position.set(0, size + 0.2, 0); // Position above the sphere
+            mesh.add(sprite);
+        }
+        
+        // --- CORE ASTRONOMICAL ALGORITHMS ---
+
+        /**
+         * Calculates Local Sidereal Time (LST) for the observer's longitude.
+         * LST is essential for converting equatorial (RA/Dec) to horizontal (Az/Alt).
+         * @param {Date} date - The current time.
+         * @param {number} longitude - Observer's longitude in degrees.
+         * @returns {number} Local Sidereal Time in degrees (0 to 360).
+         */
+        function getLocalSiderealTime(date, longitude) {
+            // Simplified calculation of Julian Day (JD)
+            const JD = date.getTime() / 86400000.0 + 2440587.5;
+            
+            // Time since J2000.0 (T) in Julian centuries (approximate)
+            const T = (JD - 2451545.0) / 36525.0; 
+
+            // Simplified Greenwich Mean Sidereal Time (GMST) in seconds
+            let GMST = 24110.54841 + 8640184.812866 * T + 0.093104 * T * T - 0.0000062 * T * T * T;
+            
+            // GMST in degrees (360 degrees in 86400 seconds)
+            GMST = (GMST / 86400.0) * 360.0;
+            GMST %= 360.0;
+            if (GMST < 0) GMST += 360.0;
+
+            // Local Sidereal Time (LST) in degrees
+            let LST = GMST + longitude;
+            LST %= 360.0;
+            if (LST < 0) LST += 360.0;
+            
+            return LST;
+        }
+
+        /**
+         * Converts Equatorial Coordinates (RA, Dec) to Horizontal Coordinates (Az, Alt).
+         * @param {number} raDeg - Right Ascension in degrees.
+         * @param {number} decDeg - Declination in degrees.
+         * @param {number} latDeg - Observer's latitude in degrees.
+         * @param {number} lstDeg - Local Sidereal Time in degrees.
+         * @returns {object} {az: Azimuth in degrees, alt: Altitude in degrees}
+         */
+        function equatorialToHorizontal(raDeg, decDeg, latDeg, lstDeg) {
+            // Convert everything to radians
+            const ra = raDeg * TO_RADIANS;
+            const dec = decDeg * TO_RADIANS;
+            const lat = latDeg * TO_RADIANS;
+            const lst = lstDeg * TO_RADIANS;
+            
+            // 1. Calculate Hour Angle (HA) in radians
+            let ha = lst - ra;
+            if (ha < 0) ha += 2 * Math.PI;
+
+            // 2. Calculate Altitude (a)
+            // sin(a) = sin(Dec)sin(Lat) + cos(Dec)cos(Lat)cos(HA)
+            const sin_alt = Math.sin(dec) * Math.sin(lat) + Math.cos(dec) * Math.cos(lat) * Math.cos(ha);
+            const alt = Math.asin(sin_alt);
+
+            // 3. Calculate Azimuth (A) using atan2 for correct quadrant
+            // Azimuth is measured clockwise from North (0°).
+            
+            // tan(A) = sin(HA) / (tan(Dec)cos(Lat) - sin(Lat)cos(HA))
+            const numerator = Math.sin(ha);
+            const denominator = Math.cos(ha) * Math.sin(lat) - Math.tan(dec) * Math.cos(lat);
+            
+            // Standard conversion results in Azimuth measured from South.
+            // We use atan2 which gives Az from the 0/180 axis.
+            let az = Math.atan2(numerator, denominator) + Math.PI;
+            
+            // Adjust to standard: 0=North, 90=East, 180=South, 270=West
+            let azDeg = az * TO_DEGREES;
+            azDeg = 360 - azDeg; // Clockwise from North
+            azDeg %= 360; 
+
+            return { az: azDeg, alt: alt * TO_DEGREES };
+        }
+        
+        // --- POSITION UPDATE LOOP ---
+        function updateCelestialPositions() {
+            const currentTime = new Date();
+            const radius = 10; // Fixed distance for AR overlay visibility (in meters)
+            
+            // Calculate LST once per frame
+            const LST_DEGREES = getLocalSiderealTime(currentTime, longitude);
+
+            celestialObjects.children.forEach(object => {
+                let azDeg, altDeg;
+                let position;
+
+                if (object.name === 'Moon' || object.name === 'Sun') {
+                    // Use SunCalc for these bodies (it handles equatorial->horizontal internally)
+                    position = (object.name === 'Moon') 
+                        ? SunCalc.getMoonPosition(currentTime, latitude, longitude)
+                        : SunCalc.getPosition(currentTime, latitude, longitude);
+                    
+                    // SunCalc Azimuth conversion (South=0 -> North=0)
+                    azDeg = (position.azimuth * TO_DEGREES + 180) % 360;
+                    altDeg = position.altitude * TO_DEGREES;
+
+                } else if (STAR_DATA[object.name]) {
+                    // Use implemented astronomical algorithm for stars/fixed planets
+                    const data = STAR_DATA[object.name];
+                    const raDeg = data.raH * 15; // Convert RA (hours) to RA (degrees)
+                    const decDeg = data.decD;
+
+                    const horizontal = equatorialToHorizontal(raDeg, decDeg, latitude, LST_DEGREES);
+                    azDeg = horizontal.az;
+                    altDeg = horizontal.alt;
+                } else {
+                    return; 
+                }
+                
+                // Only draw objects above the horizon (Altitude > 0)
+                if (altDeg < 0) {
+                    object.visible = false;
+                    return;
+                }
+                object.visible = true;
+
+                // --- 4. Convert Horizontal (Az/Alt) to 3D Cartesian (X, Y, Z) ---
+                const altRad = altDeg * TO_RADIANS;
+                const azRad = azDeg * TO_RADIANS;
+
+                // X = r * cos(Altitude) * sin(Azimuth)
+                // Y = r * sin(Altitude)
+                // Z = -r * cos(Altitude) * cos(Azimuth) (Negative Z aligns with North/forward)
+                
+                const x = radius * Math.cos(altRad) * Math.sin(azRad);
+                const y = radius * Math.sin(altRad);
+                const z = -radius * Math.cos(altRad) * Math.cos(azRad);
+
+                object.position.set(x, y, z);
+            });
+        }
+    </script>
+</body>
+</html>
+
